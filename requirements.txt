@@ -1,0 +1,10 @@
+streamlit
+torch
+transformers
+peft
+bitsandbytes
+datasets
+accelerate
+scikit-learn
+plotly
+pandas

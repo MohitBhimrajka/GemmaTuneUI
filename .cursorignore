@@ -1,0 +1,29 @@
+# Directories to ignore for Cursor AI analysis
+venv/
+env/
+build/
+dist/
+lora-gemma-output/
+__pycache__/
+.vscode/
+.idea/
+
+# Large files
+*.pt
+*.pth
+*.bin
+*.model
+*.ckpt
+
+# Docs/images
+docs/images/
+*.png
+*.jpg
+*.jpeg
+*.gif
+
+# Generated files
+*.csv
+*.json
+*.jsonl
+*.log 
