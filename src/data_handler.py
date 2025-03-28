@@ -67,6 +67,7 @@ def load_dataframe(uploaded_file):
         
         if file_format == 'csv':
             df = pd.read_csv(uploaded_file)
+            st.success(f"Successfully loaded CSV file with {len(df)} rows and {len(df.columns)} columns.")
         elif file_format == 'jsonl':
             # Read JSONL file line by line
             data = []
@@ -75,21 +76,59 @@ def load_dataframe(uploaded_file):
                 if line.strip():  # Skip empty lines
                     data.append(json.loads(line))
             df = pd.DataFrame(data)
+            st.success(f"Successfully loaded JSONL file with {len(df)} rows and {len(df.columns)} columns.")
         elif file_format == 'json':
             # Read JSON array
             df = pd.read_json(uploaded_file)
+            st.success(f"Successfully loaded JSON file with {len(df)} rows and {len(df.columns)} columns.")
         else:
-            st.error(f"Unsupported file format: {file_format}. Please upload a CSV or JSONL file.")
+            st.error(f"""
+            ❌ Unsupported file format: {file_format}
+            
+            Please upload a CSV or JSONL file with your training examples.
+            """)
             return None
             
         # Check if DataFrame is empty
         if df.empty:
-            st.error("The uploaded file appears to be empty.")
+            st.error("""
+            ❌ The uploaded file appears to be empty.
+            
+            Please make sure your file contains data in the correct format.
+            """)
             return None
             
         return df
     except Exception as e:
-        st.error(f"Error loading file: {str(e)}")
+        error_message = str(e)
+        
+        # Provide more specific error messages for common issues
+        if "Expecting ',' delimiter" in error_message:
+            st.error("""
+            ❌ CSV parsing error: The file doesn't seem to be a valid CSV file.
+            
+            Make sure the file uses commas to separate columns and each row is on a new line.
+            """)
+        elif "JSONDecodeError" in error_message or "Expecting value" in error_message:
+            st.error("""
+            ❌ JSON parsing error: The file doesn't seem to be valid JSON or JSONL.
+            
+            For JSONL files, each line should be a valid JSON object.
+            For JSON files, the entire file should be a valid JSON array.
+            """)
+        elif "UnicodeDecodeError" in error_message:
+            st.error("""
+            ❌ Encoding error: Unable to read the file.
+            
+            Please make sure your file is saved with UTF-8 encoding.
+            """)
+        else:
+            st.error(f"""
+            ❌ Error loading file: {error_message}
+            
+            Please check your file format and try again.
+            """)
+        
         return None
 
 def identify_columns(df):
@@ -103,6 +142,15 @@ def identify_columns(df):
         tuple: (prompt_col, completion_col, text_col)
     """
     column_variations = get_column_name_variations()
+    
+    # Make a list of all possible columns to check for better user feedback
+    all_acceptable_columns = []
+    all_acceptable_columns.extend(column_variations["prompt_columns"])
+    all_acceptable_columns.extend(column_variations["completion_columns"])
+    all_acceptable_columns.extend(column_variations["text_columns"])
+    
+    # Display all columns for debugging
+    st.caption(f"Your dataset contains these columns: {', '.join(df.columns)}")
     
     # Initialize variables
     prompt_col = None
@@ -173,6 +221,7 @@ def format_for_gemma(df, prompt_col, completion_col, text_col):
         # Dataset already has formatted text
         formatted_df = df.copy()
         formatted_df.rename(columns={text_col: 'text'}, inplace=True)
+        st.info(f"Using your existing '{text_col}' column as the formatted text.")
     elif prompt_col and completion_col:
         # Format using prompt and completion columns
         formatted_df = df.copy()
@@ -183,6 +232,25 @@ def format_for_gemma(df, prompt_col, completion_col, text_col):
             ), 
             axis=1
         )
+        st.info(f"Combining '{prompt_col}' and '{completion_col}' columns using Gemma's template.")
+        
+        # Show example of formatted text
+        st.markdown("### Example of how your data will be formatted:")
+        with st.expander("See formatted example", expanded=True):
+            if len(df) > 0:
+                example_input = df[prompt_col].iloc[0]
+                example_output = df[completion_col].iloc[0]
+                formatted_example = chat_template.format(
+                    prompt=example_input,
+                    completion=example_output
+                )
+                
+                st.markdown("**Original Input:**")
+                st.text(example_input)
+                st.markdown("**Original Output:**")
+                st.text(example_output)
+                st.markdown("**Formatted for Gemma:**")
+                st.code(formatted_example, language="text")
     else:
         return None
     
@@ -218,18 +286,26 @@ def load_and_format_dataset(uploaded_file):
     if not (prompt_col and completion_col) and not text_col:
         column_variations = get_column_name_variations()
         
-        prompt_examples = ", ".join(column_variations["prompt_columns"][:3])
-        completion_examples = ", ".join(column_variations["completion_columns"][:3])
-        text_examples = ", ".join(column_variations["text_columns"][:3])
+        prompt_examples = ", ".join([f"'{col}'" for col in column_variations["prompt_columns"][:3]])
+        completion_examples = ", ".join([f"'{col}'" for col in column_variations["completion_columns"][:3]])
+        text_examples = ", ".join([f"'{col}'" for col in column_variations["text_columns"][:3]])
         
         st.error(f"""
-        Could not identify the necessary columns in your dataset. 
+        ❌ **Column names not recognized in your dataset**
         
-        Your dataset should have either:
-        - Both a prompt column (like {prompt_examples}) AND a completion column (like {completion_examples})
-        - OR a single text column (like {text_examples}) that's already formatted for conversation
+        Your dataset needs to have either:
         
-        Current columns found: {', '.join(df.columns)}
+        **Option 1: Two columns (recommended)**
+        - One for user inputs/questions like {prompt_examples}
+        - One for AI responses like {completion_examples}
+        
+        **Option 2: One pre-formatted column**
+        - A single column like {text_examples} that's already formatted for conversation
+        
+        **Your current columns:** {', '.join(df.columns)}
+        
+        **Quick fix:** You can rename your columns in your file to match the expected names,
+        or modify your CSV/JSONL to use these standard column names.
         """)
         return None
     
@@ -237,7 +313,11 @@ def load_and_format_dataset(uploaded_file):
     formatted_df = format_for_gemma(df, prompt_col, completion_col, text_col)
     
     if formatted_df is None:
-        st.error("Failed to format the dataset.")
+        st.error("""
+        ❌ Failed to format the dataset.
+        
+        Please check that your data has the correct columns and format.
+        """)
         return None
     
     # Convert to datasets.Dataset
@@ -245,27 +325,19 @@ def load_and_format_dataset(uploaded_file):
     
     # Show formatting info
     if prompt_col and completion_col:
-        st.info(f"""
-        **Detected Format:**
-        - Prompt column: '{prompt_col}'
-        - Completion column: '{completion_col}'
+        st.success(f"""
+        ✅ **Dataset formatted successfully!**
         
-        Dataset has been formatted using Gemma's chat template:
-        ```
-        <start_of_turn>user
-        [Your prompt]
-        <end_of_turn>
-        <start_of_turn>model
-        [Your completion]
-        <end_of_turn>
-        ```
+        - Found input column: '{prompt_col}'
+        - Found response column: '{completion_col}'
+        - Created formatted 'text' column for Gemma using the chat template
         """)
     elif text_col:
-        st.info(f"""
-        **Detected Format:**
-        - Text column: '{text_col}'
+        st.success(f"""
+        ✅ **Dataset formatted successfully!**
         
-        Using your existing formatted text column. Make sure it follows Gemma's format requirements.
+        - Using your pre-formatted '{text_col}' column
+        - Renamed to 'text' for Gemma training
         """)
     
     return dataset

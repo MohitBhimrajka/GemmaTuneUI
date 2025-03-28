@@ -42,29 +42,114 @@ def get_default_config():
 def get_parameter_explanations():
     """
     Returns a dictionary of explanatory text snippets for hyperparameters.
+    Using simpler language for non-technical users.
     """
     return {
         # Model options
-        "model_name": "Select which version of Google's Gemma model to fine-tune. Models with 'it' are instruction-tuned versions, generally better for following directions.",
+        "model_name": """
+        Choose which Gemma model to customize:
+        
+        • 2B models are smaller and train faster - good for beginners or limited GPUs
+        • 7B models potentially give better results but need more powerful GPUs
+        • Models with 'it' are 'instruction-tuned' - already better at following directions
+        """,
         
         # Quantization options
-        "use_4bit": "Reduces the precision of model numbers from 32-bit to 4-bit. This drastically reduces memory usage (making it possible to run on consumer GPUs) with minimal impact on quality.",
+        "use_4bit": """
+        Makes the model smaller to fit in your GPU's memory.
+        
+        Keep this ON unless you have a very powerful GPU (24GB+ memory).
+        It slightly reduces precision but makes training possible on most GPUs.
+        """,
         
         # Training parameters
-        "num_train_epochs": "How many times the AI will see your entire dataset during training. More epochs can help learning but risks overfitting (memorizing instead of generalizing).",
-        "per_device_train_batch_size": "How many examples to process at once. Larger batches give more stable training but use more GPU memory.",
-        "gradient_accumulation_steps": "A technique to simulate larger batch sizes on limited memory GPUs. If your batch size is 2 and this is 4, it's like having a batch size of 8.",
-        "learning_rate": "How quickly the model adapts to your data. Too high: unstable training. Too low: slow progress. Think of it as the 'step size' for learning.",
-        "lr_scheduler_type": "Controls how the learning rate changes during training. 'Cosine' gradually reduces the learning rate, which often works well.",
-        "warmup_ratio": "Percentage of training spent gradually increasing the learning rate before decreasing it. Helps stabilize early training.",
-        "weight_decay": "A form of regularization that prevents parameter values from growing too large, which helps prevent overfitting.",
-        "max_grad_norm": "Limits how much the model can change in a single update, providing training stability.",
+        "num_train_epochs": """
+        How many times the AI will see your entire dataset during training.
+        
+        • Lower (1-2): Faster training, might not learn as well
+        • Medium (3-5): Better learning, takes longer
+        • Higher (6+): Usually not needed unless you have lots of data
+        """,
+        
+        "per_device_train_batch_size": """
+        How many examples the AI processes at once.
+        
+        • Smaller values (1-2): Use less GPU memory but train slower
+        • Larger values (4+): May improve learning but need more memory
+        
+        If you get 'out of memory' errors, lower this value.
+        """,
+        
+        "gradient_accumulation_steps": """
+        A way to simulate larger batch sizes on limited memory.
+        
+        Think of it as collecting multiple small batches before doing an update.
+        Higher values = more stable training but slower.
+        """,
+        
+        "learning_rate": """
+        How quickly the AI adapts to your examples.
+        
+        • Too low: Learning happens too slowly
+        • Too high: Learning becomes unstable
+        
+        The default value works well for most cases.
+        """,
+        
+        "lr_scheduler_type": """
+        Controls how the learning rate changes during training.
+        
+        'Cosine' gradually reduces the learning rate, helping the model fine-tune
+        more precisely as training progresses.
+        """,
+        
+        "warmup_ratio": """
+        Percentage of training spent gradually increasing the learning rate.
+        
+        This helps the model start learning smoothly. The default works well.
+        """,
+        
+        "weight_decay": """
+        Helps prevent the model from 'memorizing' your examples.
+        
+        It encourages the model to learn general patterns rather than
+        specific details. The default works well for most cases.
+        """,
+        
+        "max_grad_norm": """
+        Limits how much the model can change in a single update.
+        
+        This provides training stability. You rarely need to adjust this.
+        """,
         
         # LoRA parameters
-        "lora_r": "The 'rank' of LoRA adapters. Higher values (16, 32, etc.) give the model more capacity to learn but use more memory and risk overfitting on small datasets.",
-        "lora_alpha": "Scaling factor for LoRA. Usually set to 2x the LoRA rank. Controls the magnitude of updates.",
-        "lora_dropout": "Randomly drops connections during training to prevent overfitting. Higher values (0.1, 0.2) provide more regularization for small datasets.",
-        "target_modules": "Which parts of the model to fine-tune with LoRA. These represent the attention mechanism and feed-forward parts of the model.",
+        "lora_r": """
+        Controls how much the model can learn new things.
+        
+        • Lower values (4-8): Work well for small datasets, use less memory
+        • Higher values (16-32): Can learn more complex patterns but risk
+          memorizing examples and use more memory
+        """,
+        
+        "lora_alpha": """
+        Scaling factor for LoRA. Usually set to 2× the LoRA rank.
+        
+        Controls the strength of updates. The default works well for most cases.
+        """,
+        
+        "lora_dropout": """
+        Helps prevent memorization by randomly ignoring some connections during training.
+        
+        • Lower values (0.0-0.1): Good for larger datasets
+        • Higher values (0.1-0.3): Help with small datasets
+        """,
+        
+        "target_modules": """
+        Which parts of the model to fine-tune with LoRA.
+        
+        These are the attention layers and feed-forward networks.
+        The default settings work well for most cases.
+        """,
     }
 
 def get_column_name_variations():
@@ -73,9 +158,9 @@ def get_column_name_variations():
     Used for auto-detecting columns in user datasets.
     """
     return {
-        "prompt_columns": ["prompt", "instruction", "input", "question", "context", "user_input"],
-        "completion_columns": ["completion", "response", "output", "answer", "assistant", "model_output"],
-        "text_columns": ["text", "content", "message"]
+        "prompt_columns": ["prompt", "instruction", "input", "question", "context", "user_input", "user", "query", "human", "request", "task"],
+        "completion_columns": ["completion", "response", "output", "answer", "assistant", "model_output", "model", "result", "generated", "ai", "bot", "gpt", "assistant_response"],
+        "text_columns": ["text", "content", "message", "full_text", "conversation", "dialogue", "data", "sample"]
     }
 
 def get_gemma_chat_template():
