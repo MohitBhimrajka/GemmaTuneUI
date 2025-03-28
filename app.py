@@ -4,12 +4,14 @@ GemmaTuneUI: A user-friendly web application for fine-tuning Google's Gemma mode
 
 import streamlit as st
 import os
+import json
+import threading
 import pandas as pd
 import torch
 import traceback
-import threading
 import time
 from datetime import datetime
+from pathlib import Path
 
 # Import from our modules
 from src.utils import get_default_config, get_parameter_explanations
@@ -18,13 +20,21 @@ from src.ui_components import (
     display_training_progress, 
     display_results, 
     show_demo_data,
-    display_system_check,
-    create_sidebar,
-    show_welcome,
-    setup_page
+    display_system_check
 )
-from src.data_handler import load_and_format_dataset, load_dataset, validate_dataset
-from src.trainer import GemmaTrainer, train_model
+from src.data_handler import load_and_format_dataset
+from src.trainer import GemmaTrainer
+
+# Handle Mac-specific compatibility issues
+try:
+    import bitsandbytes as bnb
+except ImportError:
+    # bitsandbytes not installed, handled in trainer
+    pass
+except Exception as e:
+    # bitsandbytes compatibility issue, will use fallback
+    # Don't warn here - we'll handle compatibility at runtime
+    pass
 
 # Configure the page
 st.set_page_config(
@@ -46,6 +56,8 @@ if "training_status" not in st.session_state:
     st.session_state.training_status = "idle"  # idle, running, completed, error
 if "training_error" not in st.session_state:
     st.session_state.training_error = None
+if "demo_dataset" not in st.session_state:
+    st.session_state.demo_dataset = None
 
 # Check if we're in Mac testing mode (set by run.sh)
 MAC_TESTING_MODE = os.environ.get("MAC_TESTING_MODE", "0") == "1"
@@ -68,21 +80,46 @@ else:
 # Training function for background thread
 def train_in_background(dataset, config, progress_bar, status_text, log_container):
     try:
-        # Initialize trainer
-        trainer = GemmaTrainer(config)
+        # Mac compatibility check
+        if IS_APPLE_SILICON or DEVICE == "cpu":
+            status_text.text("⚠️ Running in Mac compatibility mode...")
+            # Force 8-bit and 4-bit quantization off in Mac environments
+            if config.get("use_8bit_quantization", False):
+                status_text.text("⚠️ 8-bit quantization disabled (not compatible with Mac)")
+                config["use_8bit_quantization"] = False
+                time.sleep(1)  # Let user see the message
+            
+            if config.get("use_4bit_quantization", False):
+                status_text.text("⚠️ 4-bit quantization automatically disabled (Mac compatibility)")
+                config["use_4bit_quantization"] = False 
+                time.sleep(1)
         
-        # Start training with Streamlit progress reporting
-        output_dir = trainer.train(
-            dataset,
-            progress_bar,
-            status_text,
-            log_container
-        )
+        # Log starting configuration
+        status_text.text("Starting trainer with selected configuration...")
+        log_container.text(f"Model: {config.get('model_name')}")
+        log_container.text(f"Device: {DEVICE} ({DEVICE_NAME})")
+        log_container.text(f"Examples: {len(dataset)}")
         
-        # Update session state to indicate training completion
-        st.session_state.training_complete = True
-        st.session_state.training_status = "completed"
-        st.session_state.output_dir = output_dir
+        try:
+            # Initialize trainer
+            trainer = GemmaTrainer(config)
+            
+            # Start training with Streamlit progress reporting
+            output_dir = trainer.train(
+                dataset,
+                progress_bar,
+                status_text,
+                log_container
+            )
+            
+            # Update session state to indicate training completion
+            st.session_state.training_complete = True
+            st.session_state.training_status = "completed"
+            st.session_state.output_dir = output_dir
+        except AttributeError as e:
+            if any(err in str(e) for err in ["cadam32bit", "bnb", "bitsandbytes", "quantiz"]):
+                raise RuntimeError(f"Mac compatibility issue: {str(e)}. Please disable quantization options.")
+            raise  # Re-raise other attribute errors
         
     except torch.cuda.OutOfMemoryError as e:
         # Handle CUDA OOM errors specifically
@@ -95,7 +132,7 @@ def train_in_background(dataset, config, progress_bar, status_text, log_containe
         st.session_state.training_error = f"Missing required library: {str(e)}. Please check your installation."
         st.session_state.training_status = "error"
         st.session_state.training_complete = False
-        
+    
     except Exception as e:
         # Generic error handler
         st.session_state.training_error = str(e)
@@ -104,8 +141,8 @@ def train_in_background(dataset, config, progress_bar, status_text, log_containe
 
 # Main app function
 def main():
-    # Show welcome screen
-    show_welcome()
+    # Main application title and welcome section with improved styling
+    st.title("✨ GemmaTuneUI: Easily Customize Your Own AI ✨")
     
     # If in Mac testing mode, show a special banner
     if MAC_TESTING_MODE:
@@ -117,17 +154,15 @@ def main():
         **What will work:**
         - Exploring the UI and workflow
         - Loading and validating datasets
-        - Configuring training parameters
+        - Configuring training parameters (except 8-bit quantization)
         
         **What may not work:**
+        - 8-bit quantization (automatically disabled)
         - Actual model training (may fail or be extremely slow)
         - GPU-accelerated inference
         
         For production use, we recommend using a system with an NVIDIA GPU.
         """)
-
-    # Main application title and welcome section with improved styling
-    st.title("✨ GemmaTuneUI: Easily Customize Your Own AI ✨")
 
     # Make the content more accessible and welcoming
     with st.container():
@@ -141,7 +176,11 @@ def main():
     # Clear demo data section - shows early in the workflow so users see it first
     with st.expander("👀 See a sample dataset to get started", expanded=True):
         st.markdown("Here's what a good training dataset might look like. You can use this sample to test the app!")
-    demo_dataset = show_demo_data()
+    
+    # Load demo dataset early
+    with st.spinner("Loading demo dataset..."):
+        demo_dataset = show_demo_data()
+        st.session_state.demo_dataset = demo_dataset
 
     # System compatibility check section - expanded by default for first-time users
     with st.expander("🖥️ Check Your System Compatibility", expanded=True):
@@ -171,8 +210,22 @@ def main():
     # Step 1: Configure model & training - clearer guidance
     st.header("Step 1: Configure Your Model & Training")
     st.caption("👈 Settings are on the left sidebar. Hover over any (?) icon for simple explanations of each option.")
+    
+    # Get default config
+    config = get_default_config()
+    
+    # Disable quantization features by default on Mac systems
+    if MAC_TESTING_MODE or IS_APPLE_SILICON:
+        config["use_8bit_quantization"] = False
+        config["use_4bit_quantization"] = False
+        # Use more Mac-friendly settings
+        config["batch_size"] = 1  # Smaller batch size
+        config["gradient_accumulation_steps"] = 4  # Use gradient accumulation instead
+        if "7b" in config["model_name"].lower():
+            st.warning("⚠️ On Mac systems, the smaller 2B model is recommended for better compatibility")
+    
     # Sidebar rendering
-    config = render_sidebar(get_default_config(), get_parameter_explanations())
+    config = render_sidebar(config, get_parameter_explanations())
 
     # Step 2: Upload data - improved upload UI with clearer instructions
     st.header("Step 2: Upload Your Dataset")
@@ -206,7 +259,11 @@ def main():
         # If using demo data, get it from the demo function
         with st.spinner("Preparing sample dataset..."):
             st.info("Using the sample dataset for this run.")
-            dataset = demo_dataset
+            # Use cached demo dataset
+            dataset = st.session_state.demo_dataset
+            if dataset is None:
+                dataset = show_demo_data()
+                st.session_state.demo_dataset = dataset
             st.session_state.formatted_dataset = dataset
             st.success(f"✅ Sample dataset loaded with {len(dataset)} examples!")
     else:
@@ -240,7 +297,7 @@ def main():
             # Add a stop button
             if st.button("⛔ Stop Training", type="secondary"):
                 st.session_state.training_status = "idle"
-                st.experimental_rerun()
+                st.rerun()
                 
         elif st.session_state.training_status == "error":
             # Display error message
@@ -264,12 +321,19 @@ def main():
                 💡 **File Error**: A required file could not be found. This may be due to a download error.
                 Try restarting the application.
                 """)
+            elif "Mac compatibility issue" in st.session_state.training_error or "cadam32bit_grad_fp32" in st.session_state.training_error:
+                st.error("""
+                💡 **Mac Compatibility Issue**: Your Mac is not compatible with 8-bit quantization.
+                
+                Please go to Step 1 and ensure "Use 8-bit Quantization" is **disabled** in the sidebar.
+                Then try again.
+                """)
                 
             # Reset button
             if st.button("🔄 Try Again", type="primary"):
                 st.session_state.training_status = "idle"
                 st.session_state.training_error = None
-                st.experimental_rerun()
+                st.rerun()
                 
         elif st.session_state.training_status == "completed":
             # Show completion message
@@ -300,17 +364,8 @@ def main():
                         **This is unsupported and for experimentation only.**
                         """)
                         
-                        col1, col2 = st.columns(2)
-                        with col1:
-                            continue_anyway = st.button("Yes, Continue Anyway", type="primary")
-                            if not continue_anyway:
-                                st.stop()
-                        with col2:
-                            if st.button("Cancel", type="secondary"):
-                                st.stop()
-                                
-                        if not continue_anyway:
-                            st.stop()
+                        # Removed the complex confirmation flow that was blocking execution
+                        st.info("Proceeding with training in experimental Mac mode...")
                     
                     # Initialize progress elements
                     progress_bar, status_text, log_container = display_training_progress(title=None)
@@ -345,7 +400,7 @@ def main():
                     training_thread.start()
                     
                     # Force a rerun to update UI
-                    st.experimental_rerun()
+                    st.rerun()
 
     # Step 5: Get your custom adapter - improved explanation
     st.header("Step 5: Get Your Custom AI Adapter")
@@ -371,7 +426,7 @@ def main():
     if st.button("🔄 Start Over", help="Clear all data and start a new fine-tuning session"):
         for key in st.session_state.keys():
             del st.session_state[key]
-        st.experimental_rerun()
+        st.rerun()
 
 if __name__ == "__main__":
     main()
