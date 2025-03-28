@@ -41,114 +41,178 @@ def get_default_config():
 
 def get_parameter_explanations():
     """
-    Returns a dictionary of explanatory text snippets for hyperparameters.
-    Using simpler language for non-technical users.
+    Return explanations for the various parameters in the UI.
+    
+    These are written in simple language to help non-technical users understand
+    what each setting does.
+    
+    Returns:
+        Dictionary of parameter names to their explanations
     """
     return {
-        # Model options
         "model_name": """
-        Choose which Gemma model to customize:
+        **Which Gemma model to use:**
         
-        • 2B models are smaller and train faster - good for beginners or limited GPUs
-        • 7B models potentially give better results but need more powerful GPUs
-        • Models with 'it' are 'instruction-tuned' - already better at following directions
+        • **Gemma 2B**: Smaller, faster, uses less memory. Good for most tasks and smaller GPUs (8GB+).
+        
+        • **Gemma 7B**: Larger, more capable model. Better quality but requires more GPU memory (12GB+).
         """,
         
-        # Quantization options
         "use_4bit": """
-        Makes the model smaller to fit in your GPU's memory.
+        **Memory-saving mode (QLoRA):**
         
-        Keep this ON unless you have a very powerful GPU (24GB+ memory).
-        It slightly reduces precision but makes training possible on most GPUs.
-        """,
+        • **ON** (recommended): Uses advanced memory compression to fit larger models on your GPU.
         
-        # Training parameters
-        "num_train_epochs": """
-        How many times the AI will see your entire dataset during training.
-        
-        • Lower (1-2): Faster training, might not learn as well
-        • Medium (3-5): Better learning, takes longer
-        • Higher (6+): Usually not needed unless you have lots of data
+        • **OFF**: Uses more memory but may be slightly more accurate. Only use if you have 24GB+ VRAM.
         """,
         
         "per_device_train_batch_size": """
-        How many examples the AI processes at once.
+        **Batch Size:**
         
-        • Smaller values (1-2): Use less GPU memory but train slower
-        • Larger values (4+): May improve learning but need more memory
+        How many examples to process at once. Larger values can train faster but need more memory.
         
-        If you get 'out of memory' errors, lower this value.
+        • Low memory GPU: Use 1-2
+        • Medium memory GPU: Use 2-4
+        • High memory GPU (24GB+): Can try 4-8
         """,
         
         "gradient_accumulation_steps": """
-        A way to simulate larger batch sizes on limited memory.
+        **Gradient Accumulation:**
         
-        Think of it as collecting multiple small batches before doing an update.
-        Higher values = more stable training but slower.
+        Simulates a larger batch size without using more memory. Good for small GPUs.
+        
+        • Example: Batch size 2 with accumulation 4 = Effective batch size of 8
+        • Higher numbers = Slower training but more stable
         """,
         
         "learning_rate": """
-        How quickly the AI adapts to your examples.
+        **Learning Rate:**
         
-        • Too low: Learning happens too slowly
-        • Too high: Learning becomes unstable
+        How quickly the model adapts to your examples. 
         
-        The default value works well for most cases.
+        • Too high: May learn incorrectly
+        • Too low: May not learn enough
+        • Recommended: 2e-4 (0.0002) for most cases
         """,
         
-        "lr_scheduler_type": """
-        Controls how the learning rate changes during training.
+        "num_train_epochs": """
+        **Number of Training Epochs:**
         
-        'Cosine' gradually reduces the learning rate, helping the model fine-tune
-        more precisely as training progresses.
+        How many times the model goes through your entire dataset.
+        
+        • Few examples (< 100): Try 5-10 epochs
+        • Medium dataset (100-500): Try 3-5 epochs
+        • Large dataset (500+): Try 1-3 epochs
+        
+        More epochs = more customization but risk of overfitting
+        """,
+        
+        "max_steps": """
+        **Maximum Training Steps:**
+        
+        Alternative to epochs - stops after this many steps regardless of dataset size.
+        
+        • Set to -1 to use epochs instead (recommended)
+        • Only change if you want to limit training time
         """,
         
         "warmup_ratio": """
-        Percentage of training spent gradually increasing the learning rate.
+        **Warmup Period:**
         
-        This helps the model start learning smoothly. The default works well.
+        The percentage of training used to gradually increase the learning rate.
+        
+        • Helps model adjust gradually
+        • 0.1 = 10% of training used for warmup
+        • Recommended: 0.05 to 0.1
         """,
         
-        "weight_decay": """
-        Helps prevent the model from 'memorizing' your examples.
-        
-        It encourages the model to learn general patterns rather than
-        specific details. The default works well for most cases.
-        """,
-        
-        "max_grad_norm": """
-        Limits how much the model can change in a single update.
-        
-        This provides training stability. You rarely need to adjust this.
-        """,
-        
-        # LoRA parameters
         "lora_r": """
-        Controls how much the model can learn new things.
+        **LoRA Rank:**
         
-        • Lower values (4-8): Work well for small datasets, use less memory
-        • Higher values (16-32): Can learn more complex patterns but risk
-          memorizing examples and use more memory
+        Controls how many new patterns the model can learn. Higher = more capacity but uses more memory.
+        
+        • 8-16: Minimal customization, saves memory
+        • 32-64: Balanced (recommended)
+        • 128+: Deep customization, needs more memory
         """,
         
         "lora_alpha": """
-        Scaling factor for LoRA. Usually set to 2× the LoRA rank.
+        **LoRA Alpha:**
         
-        Controls the strength of updates. The default works well for most cases.
+        Works with LoRA Rank to control adjustment strength. Usually set to 2x the rank.
+        
+        Default is good for most cases - only change if you know what you're doing.
         """,
         
         "lora_dropout": """
-        Helps prevent memorization by randomly ignoring some connections during training.
+        **LoRA Dropout:**
         
-        • Lower values (0.0-0.1): Good for larger datasets
-        • Higher values (0.1-0.3): Help with small datasets
+        Helps prevent overfitting (memorizing rather than learning).
+        
+        • Small datasets: Use higher values (0.1 - 0.2)
+        • Large datasets: Use lower values (0.05 - 0.1)
+        """,
+        
+        "max_seq_length": """
+        **Maximum Sequence Length:**
+        
+        The maximum length of text the model can process at once.
+        
+        • Shorter (256-512): Saves memory, good for short Q&A
+        • Longer (1024-2048): Better for longer tasks but uses more memory
+        """,
+        
+        "weight_decay": """
+        **Weight Decay:**
+        
+        Prevents overtraining by keeping weights small.
+        
+        • Default (0.01) works well for most cases
+        • Only change if you're familiar with ML training
+        """,
+        
+        "max_grad_norm": """
+        **Maximum Gradient Norm:**
+        
+        Limits how much the model can change in one step, helps prevent erratic learning.
+        
+        Default is good for most cases - only change if you know what you're doing.
+        """,
+        
+        "lr_scheduler_type": """
+        **Learning Rate Schedule:**
+        
+        How the learning rate changes during training.
+        
+        • "Linear": Decreases steadily (good default)
+        • "Cosine": Decreases more gradually
+        • Others are for specialized cases
+        """,
+        
+        "logging_steps": """
+        **Logging Frequency:**
+        
+        How often to record training progress.
+        
+        • Lower: More detailed progress updates
+        • Higher: Less cluttered logs
+        """,
+        
+        "save_steps": """
+        **Checkpoint Frequency:**
+        
+        How often to save progress during training.
+        
+        • Lower: More frequent saving but uses more disk space
+        • Higher: Less frequent saving
         """,
         
         "target_modules": """
-        Which parts of the model to fine-tune with LoRA.
+        **Target Modules:**
         
-        These are the attention layers and feed-forward networks.
-        The default settings work well for most cases.
+        Which parts of the model to fine-tune. Default targets the key parts.
+        
+        Don't change unless you know what you're doing.
         """,
     }
 

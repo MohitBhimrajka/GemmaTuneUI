@@ -26,75 +26,90 @@ import zipfile
 from datetime import datetime
 import gc  # For garbage collection
 import time
+import json
 
 # Define a custom callback for Streamlit integration
 class StreamlitProgressCallback(transformers.TrainerCallback):
     """
-    A callback to display training progress in Streamlit.
+    Custom callback for tracking training progress in Streamlit.
+    
+    This provides visual feedback during model training via Streamlit UI elements.
     """
+    
     def __init__(self, progress_bar, status_text, log_container, total_steps):
         """
-        Initialize the callback with Streamlit elements.
+        Initialize the callback with Streamlit UI elements.
         
         Args:
             progress_bar: Streamlit progress bar element
             status_text: Streamlit text element for status updates
             log_container: Streamlit container for detailed logs
-            total_steps: Total number of training steps
+            total_steps: Expected total steps in training
         """
         self.progress_bar = progress_bar
         self.status_text = status_text
         self.log_container = log_container
         self.total_steps = total_steps
         self.current_step = 0
-        self.training_loss = None
-        self.start_time = time.time()
+        self.start_time = None
         self.loss_history = []
+        self.training_loss = 0.0
+        self.best_loss = float('inf')
+        
+        # For log display management
+        self.log_history = []
+        self.max_logs_to_display = 10  # Limit number of log entries to prevent UI clutter
     
     def on_step_end(self, args, state, control, **kwargs):
         """
-        Update progress bar and status text on each step.
+        Update progress bar at the end of each step.
         """
-        self.current_step = state.global_step
-        if self.total_steps > 0:
-            progress = min(1.0, self.current_step / self.total_steps)
-            self.progress_bar.progress(progress)
+        if state.global_step == 0:
+            return
         
-        # Only update every few steps to avoid overwhelming the UI
-        if self.current_step % 5 == 0 or self.current_step == 1:
-            # Get loss if available
-            loss_text = ""
-            if state.log_history:
-                logs = [log for log in state.log_history if 'loss' in log]
-                if logs:
-                    self.training_loss = logs[-1]['loss']
-                    self.loss_history.append(self.training_loss)
-                    loss_text = f" | Loss: {self.training_loss:.4f}"
-            
-            # Calculate and show ETA
+        self.current_step = state.global_step
+        progress = min(float(self.current_step) / self.total_steps, 1.0)
+        self.progress_bar.progress(progress)
+        
+        # Calculate ETA
+        if self.start_time:
             elapsed_time = time.time() - self.start_time
-            if self.current_step > 0 and self.total_steps > 0:
-                time_per_step = elapsed_time / self.current_step
-                remaining_steps = self.total_steps - self.current_step
-                eta_seconds = remaining_steps * time_per_step
+            steps_per_second = self.current_step / elapsed_time if elapsed_time > 0 else 0
+            remaining_steps = self.total_steps - self.current_step
+            
+            if steps_per_second > 0:
+                eta_seconds = remaining_steps / steps_per_second
                 
-                # Format time nicely
                 if eta_seconds < 60:
                     eta_text = f"{eta_seconds:.0f} seconds"
                 elif eta_seconds < 3600:
                     eta_text = f"{eta_seconds/60:.1f} minutes"
                 else:
                     eta_text = f"{eta_seconds/3600:.1f} hours"
-                
-                self.status_text.text(f"Step {self.current_step}/{self.total_steps}{loss_text} | ETA: {eta_text}")
+                    
+                self.status_text.text(f"Training step {self.current_step}/{self.total_steps} - " + 
+                                    f"Current loss: {self.training_loss:.4f} - " +
+                                    f"ETA: {eta_text}")
             else:
-                self.status_text.text(f"Step {self.current_step}/{self.total_steps}{loss_text}")
+                self.status_text.text(f"Training step {self.current_step}/{self.total_steps} - " +
+                                    f"Current loss: {self.training_loss:.4f}")
+        else:
+            self.status_text.text(f"Training step {self.current_step}/{self.total_steps} - Loss: {self.training_loss:.4f}")
     
     def on_log(self, args, state, control, logs=None, **kwargs):
         """
         Display detailed logs.
         """
         if logs:
+            # Store loss for history if available
+            if "loss" in logs:
+                self.training_loss = logs["loss"]
+                self.loss_history.append(self.training_loss)
+                
+                # Track best loss
+                if "eval_loss" in logs and logs["eval_loss"] < self.best_loss:
+                    self.best_loss = logs["eval_loss"]
+            
             # Format log entries more clearly
             log_entries = []
             for k, v in logs.items():
@@ -103,8 +118,15 @@ class StreamlitProgressCallback(transformers.TrainerCallback):
                 else:
                     log_entries.append(f"{k}: {v}")
             
-            log_str = ", ".join(log_entries)
-            self.log_container.text(f"Step {self.current_step}: {log_str}")
+            log_str = f"Step {state.global_step}: " + ", ".join(log_entries)
+            
+            # Add to our log history and limit length
+            self.log_history.append(log_str)
+            if len(self.log_history) > self.max_logs_to_display:
+                self.log_history = self.log_history[-self.max_logs_to_display:]
+            
+            # Display all kept logs
+            self.log_container.text("\n".join(self.log_history))
     
     def on_train_begin(self, args, state, control, **kwargs):
         """
@@ -126,29 +148,33 @@ class StreamlitProgressCallback(transformers.TrainerCallback):
             time_text = f"{total_time/60:.1f} minutes"
         else:
             time_text = f"{total_time/3600:.1f} hours"
-            
-        self.status_text.text(f"Training completed in {time_text} - Final loss: {self.training_loss:.4f}")
+        
+        if hasattr(state, 'best_model_checkpoint') and state.best_model_checkpoint:
+            self.status_text.text(f"Training completed in {time_text} - Best model saved with validation loss: {self.best_loss:.4f}")
+        else:
+            self.status_text.text(f"Training completed in {time_text} - Final loss: {self.training_loss:.4f}")
         
         # Return loss history for plotting
         return self.loss_history
 
 class GemmaTrainer:
     """
-    Class for fine-tuning Gemma models with QLoRA.
+    Handles the fine-tuning of Gemma models with PEFT/LoRA.
+    
+    This class manages the entire fine-tuning process from model loading to saving.
     """
     
     def __init__(self, config):
         """
-        Initialize the trainer with the given configuration.
+        Initialize the trainer with configuration parameters.
         
         Args:
-            config: Dictionary containing training configuration
+            config: Dictionary containing training configuration parameters
         """
         self.config = config
         self.model = None
         self.tokenizer = None
         self.trainer = None
-        self.device_map = "auto"
         self.output_dir = config["output_dir"]
         
         # Ensure output directory exists
@@ -156,79 +182,84 @@ class GemmaTrainer:
     
     def load_model_and_tokenizer(self):
         """
-        Load the model and tokenizer.
+        Load the model and tokenizer based on configuration.
         """
-        # First check if CUDA is available
-        if not torch.cuda.is_available():
-            st.error("❌ CUDA not detected. Gemma requires a CUDA-enabled GPU for fine-tuning.")
-            raise RuntimeError("No CUDA GPUs are available. This application requires GPU acceleration.")
-        
-        # Check GPU memory for warnings
-        gpu_memory = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-        model_size = "7B" if "7b" in self.config["model_name"].lower() else "2B"
-        
-        if model_size == "7B" and gpu_memory < 16 and not self.config["use_4bit"]:
-            st.warning("""
-            ⚠️ Warning: You're trying to load a 7B model without quantization on a GPU with less than 16GB memory.
-            This will likely cause out-of-memory errors. Enabling 4-bit quantization is strongly recommended.
-            """)
-        elif model_size == "7B" and gpu_memory < 10:
-            st.warning("""
-            ⚠️ Warning: Loading a 7B model on a GPU with less than 10GB may be challenging even with quantization.
-            If you encounter memory errors, try the 2B model instead.
-            """)
-            
-        st.text(f"Loading {model_size} model and tokenizer - this may take a minute...")
+        progress_bar = st.progress(0.0)
         progress_placeholder = st.empty()
-        progress_bar = progress_placeholder.progress(0)
+        progress_placeholder.text("Initializing model loading...")
         
-        # Determine model loading parameters based on config
-        model_kwargs = {}
-        if self.config["use_4bit"]:
-            progress_bar.progress(0.2)
-            progress_placeholder.text("Setting up 4-bit quantization...")
-            model_kwargs.update({
-                "load_in_4bit": True,
-                "bnb_4bit_compute_dtype": torch.float16,
-                "bnb_4bit_quant_type": "nf4",
-                "bnb_4bit_use_double_quant": True,
-                "device_map": self.device_map
-            })
-        
-        # Load model with proper error handling and feedback
+        # Load model with memory-efficient settings for quantization
         try:
-            progress_placeholder.text(f"Downloading and loading {model_size} Gemma model...")
+            quantization_config = None
+            device_map = None
+            
+            progress_bar.progress(0.2)
+            progress_placeholder.text("Setting up model configuration...")
+            
+            # Configure quantization if enabled
+            if self.config["use_4bit"]:
+                try:
+                    import bitsandbytes as bnb
+                    
+                    # Make sure to handle Mac specific issues
+                    if torch.cuda.is_available():
+                        # Configure 4-bit quantization
+                        quantization_config = BitsAndBytesConfig(
+                            load_in_4bit=True,
+                            bnb_4bit_quant_type="nf4",
+                            bnb_4bit_compute_dtype=torch.float16,
+                            bnb_4bit_use_double_quant=True,
+                        )
+                        device_map = "auto"
+                    else:
+                        # If no CUDA (Mac/CPU), disable quantization
+                        st.warning("4-bit quantization requires CUDA GPU. Disabling quantization.")
+                        quantization_config = None
+                        if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+                            device_map = {"": "mps"}  # Try MPS for Apple Silicon
+                        else:
+                            device_map = {"": "cpu"}  # Fallback to CPU
+                            
+                except ImportError:
+                    st.warning("bitsandbytes package not found. Disabling 4-bit quantization.")
+                    quantization_config = None
+                    
             progress_bar.progress(0.4)
+            progress_placeholder.text(f"Loading {self.config['model_name']}...")
             
-            self.model = AutoModelForCausalLM.from_pretrained(
-                self.config["model_name"],
-                torch_dtype=torch.float16,
-                **model_kwargs
-            )
-            
-            progress_bar.progress(0.7)
-            progress_placeholder.text("Loading tokenizer...")
+            # Load model with fallbacks for different platforms
+            try:
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    self.config["model_name"],
+                    device_map=device_map,
+                    quantization_config=quantization_config,
+                    token=os.environ.get("HF_TOKEN")  # Use token if available
+                )
+            except torch.cuda.OutOfMemoryError:
+                # Handle CUDA OOM explicitly
+                st.error("GPU ran out of memory while loading the model.")
+                st.info("Try enabling 4-bit quantization or using a smaller model.")
+                raise
+            except ImportError as e:
+                if "bitsandbytes" in str(e):
+                    st.error("The bitsandbytes package is not correctly installed.")
+                    st.info("Try reinstalling with: pip install -U bitsandbytes")
+                raise
+            except Exception as e:
+                # Try fallback to CPU with warning
+                st.warning(f"Error loading model with device mapping: {str(e)}")
+                st.info("Attempting to fall back to CPU (this will be slow)...")
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    self.config["model_name"],
+                    device_map={"": "cpu"},
+                    token=os.environ.get("HF_TOKEN")
+                )
+                
+            progress_bar.progress(0.6)
+            progress_placeholder.text("Model loaded, preparing tokenizer...")
             
         except Exception as e:
-            error_msg = str(e)
-            if "out of memory" in error_msg.lower():
-                st.error("""
-                ❌ GPU out of memory while loading the model!
-                
-                Suggestions:
-                1. Enable 4-bit quantization in the sidebar
-                2. Try a smaller model (Gemma 2B instead of 7B)
-                3. Close other GPU-intensive applications
-                """)
-            elif "not found" in error_msg.lower() or "404" in error_msg:
-                st.error(f"""
-                ❌ Model '{self.config['model_name']}' not found!
-                
-                Please check the model name or your internet connection.
-                """)
-            else:
-                st.error(f"Failed to load model: {error_msg}")
-            
+            st.error(f"Failed to load model: {str(e)}")
             raise Exception(f"Failed to load model: {str(e)}")
         
         # Load tokenizer
@@ -250,7 +281,7 @@ class GemmaTrainer:
             raise Exception(f"Failed to load tokenizer: {str(e)}")
         
         # If using 4-bit quantization, prepare the model
-        if self.config["use_4bit"]:
+        if self.config["use_4bit"] and torch.cuda.is_available():
             self.model = prepare_model_for_kbit_training(self.model)
         
         # Configure LoRA
@@ -277,51 +308,66 @@ class GemmaTrainer:
         progress_bar.progress(1.0)
         progress_placeholder.empty()
         
-        st.success(f"""
-        ✅ Model loaded successfully!
-        
-        Model: {self.config['model_name']}
-        Trainable parameters: {trainable_params:,} ({percentage:.2f}% of total)
-        Quantization: {"Enabled (4-bit)" if self.config["use_4bit"] else "Disabled"}
-        """)
-        
-        return self.model, self.tokenizer
+        st.success(f"✅ Model and tokenizer loaded successfully!")
+        st.info(f"Trainable parameters: {trainable_params:,} ({percentage:.2f}% of total)")
     
     def tokenize_dataset(self, dataset):
         """
-        Tokenize the dataset.
+        Tokenize the dataset for training.
         
         Args:
-            dataset: HuggingFace dataset containing a 'text' column
-            
+            dataset: HuggingFace dataset
+        
         Returns:
-            tokenized_dataset: Tokenized dataset
+            Tokenized dataset
         """
-        # Set the maximum length to tokenize
-        max_length = 512  # Default, adjust based on your data and model
-        
-        st.text("Tokenizing your dataset...")
-        tokenize_progress = st.progress(0)
-        
         def tokenize_function(examples):
-            # Tokenize examples
-            result = self.tokenizer(
-                examples["text"],
+            inputs = self.tokenizer(
+                examples["prompt"], 
+                padding=False, 
                 truncation=True,
-                max_length=max_length,
-                padding=False,
+                max_length=self.config["max_seq_length"],
+                return_tensors=None
             )
+            
+            # Also tokenize the completions/responses
+            outputs = self.tokenizer(
+                examples["completion"], 
+                padding=False, 
+                truncation=True,
+                max_length=self.config["max_seq_length"],
+                return_tensors=None
+            )
+            
+            # Create full input/output sequences as expected for causal language modeling
+            full_inputs = []
+            full_labels = []
+            
+            for i in range(len(inputs["input_ids"])):
+                # Concatenate input and output tokens
+                full_input = inputs["input_ids"][i] + outputs["input_ids"][i][1:]  # Skip the first token to avoid repetition
+                full_label = [-100] * len(inputs["input_ids"][i]) + outputs["input_ids"][i][1:]
+                
+                # Ensure we don't exceed max length
+                if len(full_input) > self.config["max_seq_length"]:
+                    full_input = full_input[:self.config["max_seq_length"]]
+                    full_label = full_label[:self.config["max_seq_length"]]
+                
+                full_inputs.append(full_input)
+                full_labels.append(full_label)
+            
+            result = {
+                "input_ids": full_inputs,
+                "labels": full_labels
+            }
+            
             return result
         
-        # Apply tokenization to dataset
         tokenized_dataset = dataset.map(
             tokenize_function,
             batched=True,
-            remove_columns=["text"]
+            remove_columns=["prompt", "completion"]
         )
-        
-        tokenize_progress.progress(1.0)
-        st.success(f"✅ Dataset tokenized successfully with {len(tokenized_dataset)} examples!")
         
         return tokenized_dataset
     
@@ -380,8 +426,10 @@ class GemmaTrainer:
                 save_steps=self.config["save_steps"],
                 evaluation_strategy="steps" if len(eval_dataset) > 0 else "no",
                 eval_steps=self.config["save_steps"] if len(eval_dataset) > 0 else None,
-                save_total_limit=1,  # Only keep the most recent checkpoint
-                load_best_model_at_end=False,
+                save_total_limit=2,  # Keep the best and last checkpoints
+                load_best_model_at_end=True,  # Load the best model at the end of training
+                metric_for_best_model="eval_loss",  # Use validation loss to determine best model
+                greater_is_better=False,  # Lower evaluation loss is better
                 report_to="none",  # Disable wandb or other reporting
                 run_name=run_name,
                 disable_tqdm=True,  # Disable tqdm progress bars, we'll use our own
@@ -391,7 +439,7 @@ class GemmaTrainer:
             effective_batch_size = (
                 training_args.per_device_train_batch_size * 
                 training_args.gradient_accumulation_steps * 
-                torch.cuda.device_count()
+                (torch.cuda.device_count() if torch.cuda.is_available() else 1)
             )
             
             total_steps = (
@@ -437,208 +485,157 @@ class GemmaTrainer:
                 callbacks=[streamlit_callback]
             )
             
-            # Start training
+            # Train the model
+            self.trainer.train()
+            
+            # Save the model
+            self.model.save_pretrained(self.output_dir)
+            self.tokenizer.save_pretrained(self.output_dir)
+            
+            # Save training configuration
+            with open(os.path.join(self.output_dir, "training_config.json"), "w") as f:
+                json.dump(self.config, f, indent=2)
+            
+            # Get and save the training loss history for visualization
+            training_history = streamlit_callback.loss_history
             try:
-                train_result = self.trainer.train()
-                
-                # Save the final model and get training loss history
-                st.text("Saving your fine-tuned model...")
-                self.model.save_pretrained(self.output_dir)
-                self.tokenizer.save_pretrained(self.output_dir)
-                
-                # Store training loss history in session state
-                if hasattr(streamlit_callback, 'loss_history'):
-                    st.session_state.training_history = streamlit_callback.loss_history
-                
-                # Return the output directory
-                return self.output_dir
-                
-            except Exception as e:
-                error_msg = str(e)
-                
-                if "out of memory" in error_msg.lower():
-                    raise Exception(f"""CUDA out of memory during training. Try these solutions:
-                    1. Reduce batch size (current: {self.config['per_device_train_batch_size']})
-                    2. Enable 4-bit quantization if not already enabled
-                    3. Use a smaller model (e.g., 2B instead of 7B)
-                    4. Free up GPU memory by closing other applications
-                    
-                    Error details: {error_msg}
-                    """)
-                else:
-                    raise Exception(f"Training error: {error_msg}")
-                
+                with open(os.path.join(self.output_dir, "training_history.json"), "w") as f:
+                    json.dump({
+                        "loss_history": training_history,
+                        "best_loss": streamlit_callback.best_loss
+                    }, f)
+            except:
+                pass
+            
+            return self.output_dir
+            
+        except torch.cuda.OutOfMemoryError:
+            error_msg = "GPU ran out of memory during training."
+            st.error(error_msg)
+            st.info("Try enabling 4-bit quantization, reducing batch size, or using a smaller model.")
+            raise Exception(error_msg)
+        
+        except ImportError as e:
+            error_msg = f"Missing required library: {str(e)}"
+            st.error(error_msg)
+            st.info("Try reinstalling dependencies with 'pip install -r requirements.txt'")
+            raise Exception(error_msg)
+        
         except Exception as e:
-            # Clean up memory to avoid lingering tensors
-            if self.model is not None:
-                del self.model
-            if self.tokenizer is not None:
-                del self.tokenizer
-            if self.trainer is not None:
-                del self.trainer
-            
-            torch.cuda.empty_cache()
-            gc.collect()
-            
-            raise Exception(str(e))
+            error_msg = f"Error during training: {str(e)}"
+            st.error(error_msg)
+            raise Exception(error_msg)
     
     def create_adapter_zip(self):
         """
-        Create a downloadable zip file containing the adapter weights.
+        Create a zip file containing the adapter and usage instructions.
         
         Returns:
-            tuple: (zip_file_path, zip_file_name)
+            tuple: (zip_path, zip_name) - Path to the zip file and its name
         """
         try:
+            import zipfile
+            import tempfile
+            import shutil
+            
+            # Get base name for the adapter
+            adapter_base_name = os.path.basename(self.output_dir)
+            zip_name = f"{adapter_base_name}.zip"
+            
+            # Create a temporary file
             temp_dir = tempfile.mkdtemp()
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            zip_file_name = f"gemma_lora_adapter_{timestamp}.zip"
-            zip_file_path = os.path.join(temp_dir, zip_file_name)
+            zip_path = os.path.join(temp_dir, zip_name)
             
-            st.text("Creating downloadable zip file of your adapter...")
-            
-            with zipfile.ZipFile(zip_file_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            # Create the zip file
+            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
                 # Add all files from the output directory
-                for root, _, files in os.walk(self.output_dir):
+                for root, dirs, files in os.walk(self.output_dir):
                     for file in files:
                         file_path = os.path.join(root, file)
-                        arcname = os.path.relpath(file_path, self.output_dir)
+                        arcname = os.path.relpath(file_path, os.path.dirname(self.output_dir))
                         zipf.write(file_path, arcname)
                 
-                # Add a simple README with clearer instructions
-                readme_content = f"""# Gemma Fine-Tuned Adapter
+                # Add a README.md file with usage instructions
+                readme_content = f"""# Fine-Tuned Gemma Adapter
 
-This adapter was fine-tuned from the {self.config['model_name']} model using QLoRA.
+## What's in this package?
+This is a LoRA adapter for the Gemma model, fine-tuned on your custom dataset.
+The adapter is significantly smaller than the original model but contains all your customizations.
 
-## 🚀 How to Use Your Personalized AI
+## How to use your fine-tuned model
+You'll need both:
+1. The original Gemma model from Hugging Face
+2. This adapter that contains your fine-tuning
 
-### Option 1: Simple Python Script
-
+### Python Example:
 ```python
-from peft import PeftModel
 from transformers import AutoModelForCausalLM, AutoTokenizer
-
-# 1. Load the base model (must match what you fine-tuned)
-model = AutoModelForCausalLM.from_pretrained(
-    "{self.config['model_name']}",
-    device_map="auto",
-    torch_dtype="auto"
-)
-tokenizer = AutoTokenizer.from_pretrained("{self.config['model_name']}")
-
-# 2. Load your adapter
-# First extract this zip file to a folder, then:
-model = PeftModel.from_pretrained(model, "./adapter_directory")
-
-# 3. Use your personalized model
-prompt = "Write a short poem about the ocean"
-inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-outputs = model.generate(
-    **inputs,
-    max_length=200,
-    temperature=0.7
-)
-response = tokenizer.decode(outputs[0], skip_special_tokens=True)
-print(response)
-```
-
-### Option 2: Interactive Experience with Gradio
-
-```python
-import gradio as gr
 from peft import PeftModel
-from transformers import AutoModelForCausalLM, AutoTokenizer
 
-# Load model and tokenizer (same as above)
-model_name = "{self.config['model_name']}"
-model = AutoModelForCausalLM.from_pretrained(model_name, device_map="auto")
-tokenizer = AutoTokenizer.from_pretrained(model_name)
-model = PeftModel.from_pretrained(model, "./adapter_directory")
+# Load the base model (you need to download this separately)
+base_model = "google/gemma-7b"  # or gemma-2b depending on what you used
+tokenizer = AutoTokenizer.from_pretrained(base_model)
+base_model = AutoModelForCausalLM.from_pretrained(base_model)
 
-def generate_response(input_text, max_length=200, temperature=0.7):
-    inputs = tokenizer(input_text, return_tensors="pt").to(model.device)
-    outputs = model.generate(
-        **inputs,
-        max_length=max_length,
-        temperature=temperature,
-        do_sample=True
-    )
-    return tokenizer.decode(outputs[0], skip_special_tokens=True)
+# Load your adapter
+adapter_path = "./adapter"  # Path to the extracted adapter files
+model = PeftModel.from_pretrained(base_model, adapter_path)
 
-# Create a simple Gradio interface
-demo = gr.Interface(
-    fn=generate_response,
-    inputs=[
-        gr.Textbox(lines=3, placeholder="Enter your prompt here..."),
-        gr.Slider(minimum=50, maximum=500, value=200, step=10, label="Max Length"),
-        gr.Slider(minimum=0.1, maximum=1.0, value=0.7, step=0.1, label="Temperature")
-    ],
-    outputs="text",
-    title="Your Fine-Tuned Gemma Model",
-    description="Enter a prompt to get a response from your personalized AI"
-)
-
-demo.launch()
+# Generate text with your fine-tuned model
+prompt = "Write me a summary of..."
+inputs = tokenizer(prompt, return_tensors="pt")
+outputs = model.generate(**inputs, max_new_tokens=200)
+print(tokenizer.batch_decode(outputs, skip_special_tokens=True)[0])
 ```
 
 ## Training Configuration
-```
-{str({k: v for k, v in self.config.items() if k != 'target_modules'})}
-```
-
-## Need Help?
-- Check the [PEFT documentation](https://huggingface.co/docs/peft)
-- Explore [Gemma examples](https://huggingface.co/google/gemma-7b)
+The adapter was fine-tuned with the following parameters:
+- Model: {self.config.get('model_name', 'gemma')}
+- Use 4-bit quantization: {self.config.get('use_4bit', 'False')}
+- LoRA rank: {self.config.get('lora_r', '64')}
+- Batch size: {self.config.get('per_device_train_batch_size', '4')}
+- Learning rate: {self.config.get('learning_rate', '2e-4')}
+- Epochs: {self.config.get('num_train_epochs', '3')}
 """
                 zipf.writestr("README.md", readme_content)
                 
-                # Add a simple example Python script
-                example_script = """
-# example.py - Simple script to use your fine-tuned adapter
-
+                # Add a simple example script
+                example_script = """from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import PeftModel
-from transformers import AutoModelForCausalLM, AutoTokenizer
-import torch
 
-# Change these values as needed
-MODEL_NAME = "google/gemma-2b"  # Must match what you fine-tuned
-ADAPTER_PATH = "./adapter"  # Path to extracted adapter directory
-PROMPT = "Write a short story about a robot who wants to be human"
-
-# Load base model and tokenizer
-print(f"Loading base model: {MODEL_NAME}")
-model = AutoModelForCausalLM.from_pretrained(
-    MODEL_NAME,
-    device_map="auto",
-    torch_dtype=torch.float16
-)
-tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+# Load the base model (you need to download this separately)
+base_model = "google/gemma-7b"  # or "google/gemma-2b" - use the same model you trained on
+tokenizer = AutoTokenizer.from_pretrained(base_model)
+base_model = AutoModelForCausalLM.from_pretrained(base_model)
 
 # Load your adapter
-print(f"Loading adapter from: {ADAPTER_PATH}")
-model = PeftModel.from_pretrained(model, ADAPTER_PATH)
+adapter_path = "./"  # Path to the extracted adapter files (this directory)
+model = PeftModel.from_pretrained(base_model, adapter_path)
 
-# Generate a response
-print(f"Generating response to: {PROMPT}")
-inputs = tokenizer(PROMPT, return_tensors="pt").to(model.device)
-outputs = model.generate(
-    **inputs,
-    max_length=500,
-    temperature=0.7,
-    do_sample=True
-)
-response = tokenizer.decode(outputs[0], skip_special_tokens=True)
+# Function to generate responses
+def generate_response(prompt, max_length=200):
+    inputs = tokenizer(prompt, return_tensors="pt")
+    outputs = model.generate(**inputs, max_new_tokens=max_length)
+    return tokenizer.batch_decode(outputs, skip_special_tokens=True)[0]
 
-print("\n" + "-"*50)
-print("RESPONSE:")
-print("-"*50)
-print(response)
+# Example prompts - replace with relevant examples for your use case
+examples = [
+    "Write a short story about a robot learning to paint",
+    "Explain quantum computing to a 10-year old",
+    "What are the key features of a good business plan?"
+]
+
+# Generate and print responses
+for i, prompt in enumerate(examples):
+    print(f"\\nExample {i+1}:\\n{'-'*40}")
+    print(f"Prompt: {prompt}")
+    print(f"\\nResponse:")
+    print(generate_response(prompt))
 """
                 zipf.writestr("example.py", example_script)
             
-            st.success("✅ Adapter zip file created successfully!")
-            return zip_file_path, zip_file_name
+            return zip_path, zip_name
             
         except Exception as e:
-            st.error(f"Failed to create zip file: {str(e)}")
+            st.error(f"Error creating adapter zip file: {str(e)}")
             return None, None

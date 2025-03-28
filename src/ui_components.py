@@ -184,111 +184,176 @@ def display_training_progress(title="Training Progress"):
     
     return progress_bar, status_text, log_container
 
-def display_results(output_dir, training_loss=None):
+def display_results(output_dir, training_history=None):
     """
-    Display training results and provide download functionality.
+    Display training results and provide download option.
     
     Args:
-        output_dir: Directory containing saved model
-        training_loss: List of loss values from training (if available)
+        output_dir: Directory containing training results
+        training_history: Optional history of loss values for plotting
     """
-    st.subheader("🏆 Your Personalized AI Adapter is Ready!")
+    st.markdown("### Your Custom AI Adapter is Ready!")
     
-    # Display loss plot if available with improved explanation
-    if training_loss and len(training_loss) > 0:
-        st.write("### 📉 Training Progress")
+    # Prepare for download - create a zip file with the adapter and instructions
+    try:
+        import os
+        import zipfile
+        import tempfile
+        import shutil
         
-        # Create a simpler, more intuitive loss plot
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(
-            y=training_loss,
-            mode='lines',
-            name='Loss',
-            line=dict(color='rgba(76, 175, 80, 1)', width=3)
-        ))
+        # Create a temporary file for the zip
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.zip') as temp_zip_file:
+            temp_zip_path = temp_zip_file.name
         
-        fig.update_layout(
-            title="Training Progress (Lower Numbers = Better Learning)",
-            xaxis_title="Training Steps",
-            yaxis_title="Loss Value",
-            height=400,
-            xaxis=dict(showgrid=True),
-            yaxis=dict(showgrid=True),
-            plot_bgcolor='rgba(240, 240, 240, 0.5)'
-        )
-        
-        st.plotly_chart(fig, use_container_width=True)
-        
-        st.caption("""
-        **What is this chart?** This shows how well your AI was learning. 
-        The line should generally go down over time, meaning the AI is getting better at matching your examples.
-        """)
-    
-    # Check if the output directory exists
-    if os.path.exists(output_dir):
-        from src.trainer import GemmaTrainer
-        
-        # Create a trainer instance to generate the zip file
-        # We need config for this, so we'll use a dummy config
-        dummy_config = {"model_name": "google/gemma-2b", "output_dir": output_dir}
-        trainer = GemmaTrainer(dummy_config)
-        
-        # Create zip file
-        zip_path, zip_name = trainer.create_adapter_zip()
-        
-        if zip_path and os.path.exists(zip_path):
-            # Read the zip file
-            with open(zip_path, "rb") as f:
-                zip_data = f.read()
+        # Create the zip file
+        with zipfile.ZipFile(temp_zip_path, 'w') as zipf:
+            # Walk through the output directory and add all files
+            for root, dirs, files in os.walk(output_dir):
+                for file in files:
+                    file_path = os.path.join(root, file)
+                    arcname = os.path.relpath(file_path, os.path.dirname(output_dir))
+                    zipf.write(file_path, arcname)
             
-            # Create more prominent download section
-            st.markdown("### 📥 Download Your AI Adapter")
-            
-            col1, col2 = st.columns([2, 1])
-            with col1:
-                st.download_button(
-                    label="📥 Download Fine-Tuned AI Adapter (.zip)",
-                    data=zip_data,
-                    file_name=zip_name,
-                    mime="application/zip",
-                    help="Download the adapter that contains your fine-tuned model adjustments.",
-                    use_container_width=True
-                )
-            
-            # Clearer explanation of what they're downloading
-            st.info("""
-            **What you're downloading:** This zip file contains your AI adapter - it's the *changes* made to the 
-            base Gemma model during training. It's much smaller than the full model (just a few MB instead of several GB).
-            
-            **To use it later:**
-            1. You'll still need the original Gemma model
-            2. This adapter attaches to it to create your personalized version
-            3. The README.md file in the zip has step-by-step instructions!
-            """)
-            
-            # Show example usage code
-            with st.expander("See example code for using your adapter"):
-                st.code("""
-# Python code to use your adapter with the base Gemma model
-from peft import PeftModel, PeftConfig
+            # Add a README file with usage instructions
+            readme_content = """# Your Custom Gemma Adapter
+
+## What's in this package?
+This package contains a LoRA adapter for Google's Gemma model that has been fine-tuned on your data.
+The adapter is a small file that modifies the base Gemma model to behave according to your examples.
+
+## How to use your adapter
+1. You'll need the base Gemma model from Hugging Face
+2. Load both the base model and this adapter to get your customized AI
+
+### Python code example:
+```python
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from peft import PeftModel, PeftConfig
 
-# Load the base model and tokenizer
-model = AutoModelForCausalLM.from_pretrained("google/gemma-2b")  # Use the same model you selected
-tokenizer = AutoTokenizer.from_pretrained("google/gemma-2b")
+# Load the base model
+model_name = "google/gemma-7b"  # or "google/gemma-2b"
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+model = AutoModelForCausalLM.from_pretrained(model_name)
 
-# Load your adapter (after unzipping it)
-model = PeftModel.from_pretrained(model, "./your_adapter_directory")
+# Load your custom adapter
+adapter_path = "./gemma_adapter"  # Path to the extracted adapter files
+model = PeftModel.from_pretrained(model, adapter_path)
 
-# Use your personalized model
-response = model.generate(
-    **tokenizer("Write me a short poem about the ocean", return_tensors="pt"),
-    max_length=200
-)
-print(tokenizer.decode(response[0], skip_special_tokens=True))
-                """, language="python")
-    else:
-        st.error(f"Output directory {output_dir} not found.")
+# Generate text with your custom model
+prompt = "Write a summary of the latest quarterly report"
+inputs = tokenizer(prompt, return_tensors="pt")
+outputs = model.generate(**inputs, max_new_tokens=500)
+print(tokenizer.decode(outputs[0], skip_special_tokens=True))
+```
+
+## Important notes
+- This is NOT the complete model, just an adapter (a few MB vs. several GB)
+- You still need to download the base Gemma model separately
+- The adapter works best on similar tasks to your training data
+"""
+            zipf.writestr("README.md", readme_content)
+            
+            # Add a sample Python script to use the adapter
+            sample_code = """from transformers import AutoModelForCausalLM, AutoTokenizer
+from peft import PeftModel, PeftConfig
+
+# Load the base model
+model_name = "google/gemma-7b"  # or "google/gemma-2b" 
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+model = AutoModelForCausalLM.from_pretrained(model)
+
+# Load your custom adapter
+adapter_path = "./gemma_adapter"  # Path to the extracted adapter files
+model = PeftModel.from_pretrained(model, adapter_path)
+
+# Generate text with your custom model
+def generate_response(prompt, max_length=500):
+    inputs = tokenizer(prompt, return_tensors="pt")
+    outputs = model.generate(**inputs, max_length=max_length)
+    return tokenizer.decode(outputs[0], skip_special_tokens=True)
+
+# Example usage
+prompt = "Write a summary of the latest quarterly report"
+response = generate_response(prompt)
+print(response)
+"""
+            zipf.writestr("use_your_adapter.py", sample_code)
+        
+        # Provide download link
+        with open(temp_zip_path, "rb") as f:
+            st.download_button(
+                label="⬇️ Download Your Custom AI Adapter",
+                data=f,
+                file_name="gemma_custom_adapter.zip",
+                mime="application/zip",
+                help="Download your fine-tuned adapter to use with the Gemma model"
+            )
+        
+        # Add explanatory notes
+        st.info("""
+        ### What You're Downloading
+        
+        This is a **small adapter file** (typically just a few MB), NOT the full Gemma model.
+        
+        **To use your custom AI:**
+        1. Download this adapter
+        2. Get the base Gemma model from Hugging Face
+        3. Load both together using the included example code
+        
+        The adapter contains all the customizations from your training data!
+        """)
+        
+        # Display the location of the adapter
+        st.markdown(f"**Adapter saved to:** `{output_dir}`")
+        
+        # Clean up the temporary file
+        os.unlink(temp_zip_path)
+        
+    except Exception as e:
+        st.error(f"Error preparing download: {str(e)}")
+    
+    # If we have training history, plot the loss curve
+    if training_history and len(training_history) > 0:
+        st.markdown("### Training Loss")
+        st.caption("**Lower values indicate better learning.** The model improves as training progresses.")
+        
+        try:
+            import pandas as pd
+            import plotly.express as px
+            
+            # Create dataframe for plotting
+            df = pd.DataFrame({
+                "Step": list(range(1, len(training_history) + 1)),
+                "Loss": training_history
+            })
+            
+            # Create interactive plot
+            fig = px.line(
+                df, x="Step", y="Loss", 
+                title="Training Loss Over Time",
+                labels={"Loss": "Training Loss (lower is better)"}
+            )
+            fig.update_layout(
+                title_font_size=20,
+                xaxis_title_font_size=16,
+                yaxis_title_font_size=16
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Add some interpretation
+            if len(training_history) > 1:
+                initial_loss = training_history[0]
+                final_loss = training_history[-1]
+                improvement = (initial_loss - final_loss) / initial_loss * 100
+                
+                if improvement > 0:
+                    st.success(f"Loss improved by {improvement:.1f}% during training! (from {initial_loss:.4f} to {final_loss:.4f})")
+                else:
+                    st.warning("The model didn't show significant improvement. Consider training for longer or with a different dataset.")
+                
+        except Exception as e:
+            st.error(f"Error plotting training history: {str(e)}")
 
 def show_demo_data():
     """
@@ -353,89 +418,107 @@ def show_demo_data():
     
     return demo_dataset
 
-def display_system_check():
+def display_system_check(device="cpu", device_name="Unknown", device_info="CPU only"):
     """
-    Display system compatibility information with clearer explanations and visual indicators.
-    """
-    import torch
+    Display information about the system and check for compatibility.
     
-    # Check for CUDA availability with more user-friendly output
-    if torch.cuda.is_available():
-        gpu_count = torch.cuda.device_count()
-        gpu_name = torch.cuda.get_device_name(0) if gpu_count > 0 else "Unknown"
-        gpu_memory = torch.cuda.get_device_properties(0).total_memory / (1024**3) if gpu_count > 0 else 0
+    Args:
+        device: The device being used ('cuda', 'mps', or 'cpu')
+        device_name: The name of the device
+        device_info: Additional device information
+    """
+    system_col1, system_col2 = st.columns(2)
+    
+    with system_col1:
+        st.markdown("### Hardware")
         
-        st.success(f"✅ **GPU Detected:** {gpu_name}")
-        st.markdown(f"**Available VRAM:** {gpu_memory:.1f} GB")
-        st.markdown(f"**CUDA Version:** {torch.version.cuda}")
+        # GPU information with clearer explanation of requirements
+        st.markdown(f"**Device:** {device_name}")
+        st.markdown(f"**Type:** {device_info}")
         
-        # Check memory requirements with clearer recommendations
-        if gpu_memory < 8:
-            st.warning("""
-            ⚠️ **Limited GPU Memory:** Your GPU has less than 8GB memory, which may be insufficient.
-            
-            **Recommendations:**
-            - Use the Gemma 2B model (not 7B)
-            - Keep 4-bit quantization (QLoRA) enabled
-            - Set batch size to 1
-            - You may still encounter memory errors
+        # Make GPU requirements clearer
+        if device == "cuda":
+            st.success("✅ **NVIDIA GPU Detected:** Your system can run training!")
+            # Check VRAM and give additional guidance
+            try:
+                import torch
+                vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+                
+                if vram_gb < 8:
+                    st.warning(f"⚠️ Limited VRAM: {vram_gb:.1f} GB. Enable 4-bit mode and use Gemma 2B.")
+                elif vram_gb < 12:
+                    st.info(f"ℹ️ VRAM: {vram_gb:.1f} GB. Enable 4-bit mode for Gemma 7B.")
+                else:
+                    st.success(f"✅ VRAM: {vram_gb:.1f} GB. Good for Gemma 7B!")
+            except:
+                st.info("Could not determine VRAM amount. Monitor memory usage during training.")
+        else:
+            if device == "mps":
+                st.warning("⚠️ **Apple Silicon Detected:** Limited testing mode only. Full training requires NVIDIA GPU.")
+            else:
+                st.error("❌ **No GPU Detected:** Training requires an NVIDIA GPU with CUDA support.")
+    
+    with system_col2:
+        st.markdown("### Software")
+        
+        # Python version check
+        import sys
+        python_version = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+        if sys.version_info.major == 3 and sys.version_info.minor >= 9:
+            st.success(f"✅ **Python {python_version}:** Compatible")
+        else:
+            st.error(f"❌ **Python {python_version}:** Python 3.9+ required")
+        
+        # PyTorch check with clearer explanation
+        import torch
+        torch_version = torch.__version__
+        st.markdown(f"**PyTorch:** {torch_version}")
+        
+        # CUDA check with clearer explanation
+        if torch.cuda.is_available():
+            cuda_version = torch.version.cuda
+            st.success(f"✅ **CUDA {cuda_version}:** Ready for training")
+        else:
+            if device == "mps":
+                st.warning("⚠️ **MPS:** Apple Silicon GPU (limited support)")
+            else:
+                st.error("❌ **CUDA:** Not available (required for training)")
+    
+    # Clear recommendations
+    st.markdown("### Recommended Setup")
+    
+    if device != "cuda":
+        st.error("""
+        For proper training, you need:
+        - NVIDIA GPU with 8GB+ VRAM (RTX 3060 or better)
+        - CUDA toolkit installed
+        - PyTorch with CUDA support
+        
+        **Alternative:** Use a cloud provider like Google Colab, vast.ai, or runpod.io
+        """)
+    elif device == "cuda":
+        import torch
+        vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+        
+        if vram_gb < 8:
+            st.warning(f"""
+            Your GPU has limited memory ({vram_gb:.1f} GB):
+            - Use the 2B model instead of 7B
+            - Enable 4-bit quantization
+            - Keep batch size at 1
+            - Limit dataset size to 100-200 examples
             """)
-        elif gpu_memory < 16:
-            st.success("""
-            ✅ **Suitable GPU Memory:** Your GPU should work well with Gemma 2B models.
-            
-            **Recommendations:**
-            - Keep 4-bit quantization (QLoRA) enabled for best results
-            - For Gemma 7B models, use a batch size of 1
+        elif vram_gb < 16:
+            st.info(f"""
+            Your GPU has {vram_gb:.1f} GB memory:
+            - Use 4-bit quantization for the 7B model
+            - Keep batch size between 1-4
+            - Dataset can be up to 1000 examples
             """)
         else:
-            st.success("""
-            ✅ **Excellent GPU Memory:** Your GPU should work well with all Gemma models.
-            
-            You can use either 2B or 7B models with good performance.
+            st.success(f"""
+            Your GPU has good memory ({vram_gb:.1f} GB):
+            - Can use all models with 4-bit quantization
+            - Can use larger batch sizes (4-8)
+            - Can handle larger datasets (1000+ examples)
             """)
-    else:
-        st.error("""
-        ❌ **No CUDA GPU Detected:** This application requires an NVIDIA GPU with CUDA support.
-        
-        **Without a compatible GPU:**
-        - Fine-tuning will fail or be extremely slow
-        - You may get CUDA-related errors
-        
-        **What you need:**
-        - An NVIDIA GPU (RTX 3060 or better recommended)
-        - Properly installed NVIDIA drivers
-        - CUDA toolkit installed (version 11.8+ recommended)
-        """)
-    
-    # Check for bitsandbytes with clearer explanation
-    try:
-        import bitsandbytes as bnb
-        st.success("✅ **Quantization library (bitsandbytes) installed correctly**")
-        st.caption("This enables 4-bit quantization (QLoRA) for memory-efficient training")
-    except ImportError:
-        st.warning("""
-        ⚠️ **bitsandbytes library not found**
-        
-        This is required for 4-bit quantization (QLoRA). Without it, memory usage will be much higher.
-        Try reinstalling requirements: `pip install -r requirements.txt`
-        """)
-    except Exception as e:
-        st.warning(f"⚠️ **bitsandbytes issue:** {str(e)}")
-    
-    # Show available disk space with clearer formatting
-    import shutil
-    disk_usage = shutil.disk_usage("/")
-    disk_free_gb = disk_usage.free / (1024**3)
-    
-    if disk_free_gb < 5:
-        st.warning(f"⚠️ **Low disk space:** {disk_free_gb:.1f} GB free. At least 5GB recommended.")
-    else:
-        st.success(f"✅ **Disk space available:** {disk_free_gb:.1f} GB free")
-        
-    # Show a summary of system readiness
-    st.markdown("---")
-    if torch.cuda.is_available() and disk_free_gb >= 5:
-        st.success("✅ **Your system is ready for fine-tuning!**")
-    else:
-        st.warning("⚠️ **Your system may not be fully compatible** - check the warnings above.")
