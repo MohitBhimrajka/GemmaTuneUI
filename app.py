@@ -25,17 +25,6 @@ from src.ui_components import (
 from src.data_handler import load_and_format_dataset
 from src.trainer import GemmaTrainer
 
-# Handle Mac-specific compatibility issues
-try:
-    import bitsandbytes as bnb
-except ImportError:
-    # bitsandbytes not installed, handled in trainer
-    pass
-except Exception as e:
-    # bitsandbytes compatibility issue, will use fallback
-    # Don't warn here - we'll handle compatibility at runtime
-    pass
-
 # Configure the page
 st.set_page_config(
     page_title="GemmaTuneUI - Easy Fine-Tuning", 

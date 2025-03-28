@@ -10,7 +10,8 @@ from transformers import (
     AutoTokenizer, 
     TrainingArguments, 
     Trainer,
-    DataCollatorForLanguageModeling
+    DataCollatorForLanguageModeling,
+    BitsAndBytesConfig  # Import here instead of conditionally
 )
 from peft import (
     LoraConfig, 
@@ -18,7 +19,17 @@ from peft import (
     prepare_model_for_kbit_training,
     TaskType
 )
-import bitsandbytes as bnb
+# Import bitsandbytes only if CUDA is available, otherwise skip
+try:
+    if torch.cuda.is_available():
+        import bitsandbytes as bnb
+except ImportError:
+    # Silently continue - we'll handle this during model loading
+    pass
+except Exception:
+    # Silent handling of any other issues
+    pass
+
 import streamlit as st
 import shutil
 import tempfile
@@ -196,38 +207,48 @@ class GemmaTrainer:
             progress_bar.progress(0.2)
             progress_placeholder.text("Setting up model configuration...")
             
-            # Configure quantization if enabled
-            if self.config["use_4bit"]:
+            # Check device availability
+            is_cuda = torch.cuda.is_available()
+            is_mps = hasattr(torch.backends, 'mps') and torch.backends.mps.is_available()
+            
+            # Set device map based on available devices
+            if is_cuda:
+                device_map = "auto"
+            elif is_mps:
+                device_map = {"": "mps"}  # Use MPS for Apple Silicon
+                # Disable quantization on Mac 
+                self.config["use_4bit"] = False
+                self.config["use_8bit"] = False
+                st.warning("Quantization disabled on Mac (not supported). Using standard precision.")
+            else:
+                device_map = {"": "cpu"}  # Fallback to CPU
+                # Disable quantization on CPU
+                self.config["use_4bit"] = False 
+                self.config["use_8bit"] = False
+                st.warning("Quantization disabled on CPU (not supported). Using standard precision.")
+            
+            # Configure quantization if enabled AND on CUDA
+            if self.config.get("use_4bit", False) and is_cuda:
                 try:
-                    import bitsandbytes as bnb
+                    from transformers import BitsAndBytesConfig
                     
-                    # Make sure to handle Mac specific issues
-                    if torch.cuda.is_available():
-                        # Configure 4-bit quantization
-                        quantization_config = BitsAndBytesConfig(
-                            load_in_4bit=True,
-                            bnb_4bit_quant_type="nf4",
-                            bnb_4bit_compute_dtype=torch.float16,
-                            bnb_4bit_use_double_quant=True,
-                        )
-                        device_map = "auto"
-                    else:
-                        # If no CUDA (Mac/CPU), disable quantization
-                        st.warning("4-bit quantization requires CUDA GPU. Disabling quantization.")
-                        quantization_config = None
-                        if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-                            device_map = {"": "mps"}  # Try MPS for Apple Silicon
-                        else:
-                            device_map = {"": "cpu"}  # Fallback to CPU
-                            
+                    # Configure 4-bit quantization
+                    quantization_config = BitsAndBytesConfig(
+                        load_in_4bit=True,
+                        bnb_4bit_quant_type="nf4",
+                        bnb_4bit_compute_dtype=torch.float16,
+                        bnb_4bit_use_double_quant=True,
+                    )
+                    
                 except ImportError:
-                    st.warning("bitsandbytes package not found. Disabling 4-bit quantization.")
+                    st.warning("bitsandbytes package not properly installed. Disabling 4-bit quantization.")
                     quantization_config = None
-                    
+                    self.config["use_4bit"] = False
+            
             progress_bar.progress(0.4)
             progress_placeholder.text(f"Loading {self.config['model_name']}...")
             
-            # Load model with fallbacks for different platforms
+            # Load model with the configured settings
             try:
                 self.model = AutoModelForCausalLM.from_pretrained(
                     self.config["model_name"],
@@ -235,26 +256,18 @@ class GemmaTrainer:
                     quantization_config=quantization_config,
                     token=os.environ.get("HF_TOKEN")  # Use token if available
                 )
-            except torch.cuda.OutOfMemoryError:
-                # Handle CUDA OOM explicitly
-                st.error("GPU ran out of memory while loading the model.")
-                st.info("Try enabling 4-bit quantization or using a smaller model.")
-                raise
-            except ImportError as e:
-                if "bitsandbytes" in str(e):
-                    st.error("The bitsandbytes package is not correctly installed.")
-                    st.info("Try reinstalling with: pip install -U bitsandbytes")
+                
+                # Only prepare for k-bit training if actually using quantization on CUDA
+                if self.config.get("use_4bit", False) and is_cuda and quantization_config is not None:
+                    self.model = prepare_model_for_kbit_training(self.model)
+            
+            except torch.cuda.OutOfMemoryError as e:
+                st.error("GPU ran out of memory while loading the model. Try enabling 4-bit quantization or using a smaller model.")
                 raise
             except Exception as e:
-                # Try fallback to CPU with warning
-                st.warning(f"Error loading model with device mapping: {str(e)}")
-                st.info("Attempting to fall back to CPU (this will be slow)...")
-                self.model = AutoModelForCausalLM.from_pretrained(
-                    self.config["model_name"],
-                    device_map={"": "cpu"},
-                    token=os.environ.get("HF_TOKEN")
-                )
-                
+                st.error(f"Error loading model: {str(e)}")
+                raise
+            
             progress_bar.progress(0.6)
             progress_placeholder.text("Model loaded, preparing tokenizer...")
             
@@ -279,10 +292,6 @@ class GemmaTrainer:
         except Exception as e:
             st.error(f"Failed to load tokenizer: {str(e)}")
             raise Exception(f"Failed to load tokenizer: {str(e)}")
-        
-        # If using 4-bit quantization, prepare the model
-        if self.config["use_4bit"] and torch.cuda.is_available():
-            self.model = prepare_model_for_kbit_training(self.model)
         
         # Configure LoRA
         progress_bar.progress(0.9)
@@ -373,18 +382,25 @@ class GemmaTrainer:
     
     def train(self, dataset, progress_bar, status_text, log_container):
         """
-        Train the model.
+        Fine-tune the model on the provided dataset.
         
         Args:
-            dataset: HuggingFace dataset
-            progress_bar: Streamlit progress bar element
+            dataset: The dataset to train on (must have 'text' column)
+            progress_bar: Streamlit progress bar for visual feedback
             status_text: Streamlit text element for status updates
             log_container: Streamlit container for detailed logs
             
         Returns:
-            output_dir: Directory containing saved model
+            str: Path to the output directory with the fine-tuned model
         """
         try:
+            # Safety check for dataset
+            if dataset is None or len(dataset) == 0:
+                status_text.text("⚠️ Error: Empty dataset provided")
+                progress_bar.progress(1.0)
+                st.error("Cannot train on empty dataset. Please provide valid training data.")
+                return None
+        
             # Load model and tokenizer if not already loaded
             if self.model is None or self.tokenizer is None:
                 self.load_model_and_tokenizer()
@@ -393,46 +409,52 @@ class GemmaTrainer:
             tokenized_dataset = self.tokenize_dataset(dataset)
             
             # Check if dataset is empty after tokenization
-            if len(tokenized_dataset) == 0:
-                raise Exception("Tokenized dataset is empty. Please check your data.")
-            
-            # Split dataset into train and validation sets (80/20)
-            st.text("Splitting dataset into training and validation sets (80/20)...")
+            if tokenized_dataset is None or len(tokenized_dataset) == 0:
+                status_text.text("⚠️ Error: Dataset processing failed")
+                progress_bar.progress(1.0)
+                st.error("Tokenized dataset is empty. Please check your data format.")
+                return None
+                
+            # Split dataset
             split_datasets = tokenized_dataset.train_test_split(test_size=0.2, seed=42)
             train_dataset = split_datasets["train"]
             eval_dataset = split_datasets["test"]
             
-            st.success(f"✅ Training set: {len(train_dataset)} examples, Validation set: {len(eval_dataset)} examples")
+            st.success(f"✅ Dataset prepared - Training: {len(train_dataset)} examples, Validation: {len(eval_dataset)} examples")
+            
+            # Determine the optimizer based on device and config
+            is_cuda = torch.cuda.is_available() 
+            use_4bit = self.config.get("use_4bit", False)
+            
+            if is_cuda and use_4bit:
+                # Use 8-bit AdamW when QLoRA is active on CUDA
+                optimizer_choice = "paged_adamw_8bit"
+                st.info("Using 8-bit Paged AdamW optimizer (recommended for QLoRA).")
+            else:
+                # Use standard PyTorch AdamW for non-CUDA or non-quantized training
+                optimizer_choice = "adamw_torch"
+                st.info(f"Using standard AdamW optimizer (device: {'CUDA' if is_cuda else 'CPU/MPS'}).")
             
             # Set up training arguments
-            current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
-            run_name = f"gemma_lora_{current_time}"
-            
-            st.text("Configuring training parameters...")
-            
             training_args = TrainingArguments(
                 output_dir=self.output_dir,
                 per_device_train_batch_size=self.config["per_device_train_batch_size"],
-                per_device_eval_batch_size=self.config["per_device_train_batch_size"],
                 gradient_accumulation_steps=self.config["gradient_accumulation_steps"],
                 learning_rate=self.config["learning_rate"],
-                lr_scheduler_type=self.config["lr_scheduler_type"],
-                warmup_ratio=self.config["warmup_ratio"],
-                weight_decay=self.config["weight_decay"],
-                max_grad_norm=self.config["max_grad_norm"],
                 num_train_epochs=self.config["num_train_epochs"],
-                max_steps=self.config["max_steps"],
                 logging_steps=self.config["logging_steps"],
+                save_strategy=self.config["save_strategy"],
                 save_steps=self.config["save_steps"],
-                evaluation_strategy="steps" if len(eval_dataset) > 0 else "no",
-                eval_steps=self.config["save_steps"] if len(eval_dataset) > 0 else None,
-                save_total_limit=2,  # Keep the best and last checkpoints
-                load_best_model_at_end=True,  # Load the best model at the end of training
-                metric_for_best_model="eval_loss",  # Use validation loss to determine best model
-                greater_is_better=False,  # Lower evaluation loss is better
-                report_to="none",  # Disable wandb or other reporting
-                run_name=run_name,
-                disable_tqdm=True,  # Disable tqdm progress bars, we'll use our own
+                optim=optimizer_choice,
+                evaluation_strategy=self.config["evaluation_strategy"],
+                eval_steps=self.config["eval_steps"],
+                report_to="none",
+                save_total_limit=1,
+                load_best_model_at_end=True,
+                fp16=torch.cuda.is_available(),
+                bf16=False,
+                # Use MPS device if available and no CUDA
+                use_mps_device=hasattr(torch.backends, 'mps') and torch.backends.mps.is_available() and not torch.cuda.is_available()
             )
             
             # Compute total steps for progress bar
